@@ -97,3 +97,25 @@ fn deserialize_128bit() {
     let q = format!("min={}", i128::MIN);
     assert_eq!(serde_urlencoded::from_str(&q), Ok(result));
 }
+
+#[derive(Deserialize, Debug, PartialEq, Eq)]
+struct Nums {
+    num: Vec<u8>,
+}
+
+#[test]
+fn deserialize_repeated_name() {
+    let result = Nums { num: vec![] };
+    assert_eq!(serde_urlencoded::from_str("num="), Ok(result));
+
+    let result = Nums { num: vec![1] };
+    assert_eq!(serde_urlencoded::from_str("num=1"), Ok(result));
+
+    let result = Nums { num: vec![1, 2] };
+    assert_eq!(serde_urlencoded::from_str("num=1&num=2"), Ok(result));
+
+    assert!(serde_urlencoded::from_str::<Nums>(
+        "num=1&num=2&another=thing&num=3"
+    )
+    .is_err());
+}

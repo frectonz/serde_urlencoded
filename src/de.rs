@@ -4,10 +4,12 @@ use form_urlencoded::parse;
 use form_urlencoded::Parse as UrlEncodedParse;
 use serde::de::value::MapDeserializer;
 use serde::de::Error as de_Error;
+use serde::de::SeqAccess;
 use serde::de::{self, IntoDeserializer};
 use serde::forward_to_deserialize_any;
 use std::borrow::Cow;
 use std::io::Read;
+use std::iter::Peekable;
 
 #[doc(inline)]
 pub use serde::de::value::Error;
@@ -87,7 +89,7 @@ impl<'de> Deserializer<'de> {
     /// Returns a new `Deserializer`.
     pub fn new(parser: UrlEncodedParse<'de>) -> Self {
         Deserializer {
-            inner: MapDeserializer::new(PartIterator(parser)),
+            inner: MapDeserializer::new(PartIterator(parser.peekable())),
         }
     }
 }
@@ -155,13 +157,20 @@ impl<'de> de::Deserializer<'de> for Deserializer<'de> {
     }
 }
 
-struct PartIterator<'de>(UrlEncodedParse<'de>);
+struct PartIterator<'de>(Peekable<UrlEncodedParse<'de>>);
 
 impl<'de> Iterator for PartIterator<'de> {
     type Item = (Part<'de>, Part<'de>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|(k, v)| (Part(k), Part(v)))
+        let (key, mut value) = self.0.next()?;
+
+        while self.0.peek().map(|(k, _)| *k == key).unwrap_or(false) {
+            let v = self.0.next().map(|(_, v)| v).unwrap();
+            value = Cow::Owned(format!("{value} {v}"));
+        }
+
+        Some((Part(key), Part(value)))
     }
 }
 
@@ -233,6 +242,13 @@ impl<'de> de::Deserializer<'de> for Part<'de> {
         visitor.visit_newtype_struct(self)
     }
 
+    fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: de::Visitor<'de>,
+    {
+        visitor.visit_seq(SpaceSeparated::new(self.0))
+    }
+
     forward_to_deserialize_any! {
         char
         str
@@ -246,7 +262,6 @@ impl<'de> de::Deserializer<'de> for Part<'de> {
         identifier
         tuple
         ignored_any
-        seq
         map
     }
 
@@ -321,5 +336,35 @@ impl<'de> de::VariantAccess<'de> for UnitOnlyVariantAccess {
         V: de::Visitor<'de>,
     {
         Err(Error::custom("expected unit variant"))
+    }
+}
+
+struct SpaceSeparated(Vec<String>);
+
+impl<'a> SpaceSeparated {
+    fn new(s: Cow<'a, str>) -> Self {
+        Self(
+            s.split_ascii_whitespace()
+                .map(ToOwned::to_owned)
+                .rev()
+                .collect(),
+        )
+    }
+}
+
+impl<'de> SeqAccess<'de> for SpaceSeparated {
+    type Error = Error;
+
+    fn next_element_seed<T>(
+        &mut self,
+        seed: T,
+    ) -> Result<Option<T::Value>, Self::Error>
+    where
+        T: de::DeserializeSeed<'de>,
+    {
+        match self.0.pop() {
+            Some(v) => seed.deserialize(Part(Cow::Owned(v))).map(Some),
+            None => Ok(None),
+        }
     }
 }
